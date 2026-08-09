@@ -156,6 +156,9 @@ pub fn apply_rigid_body_user_changes(
             } else if sleeping.sleeping && !activation.sleeping {
                 rb.sleep();
             }
+
+            // Publish explicit wake/sleep transitions even if no simulation substep follows.
+            rigidbody_set.queue_body_for_writeback(handle.0);
         }
     }
 
@@ -172,6 +175,9 @@ pub fn apply_rigid_body_user_changes(
             .into_inner();
         if let Some(rb) = context.bodies.get_mut(handle.0) {
             rb.set_body_type((*rb_type).into(), true);
+
+            // Body-type changes can normalize velocity or activation outside an island step.
+            context.queue_body_for_writeback(handle.0);
         }
     }
 
@@ -241,6 +247,9 @@ pub fn apply_rigid_body_user_changes(
                         rigidbody_set
                             .last_body_transform_set
                             .insert(handle.0, *global_transform);
+
+                        // Position-based kinematics publish only their current accepted pose.
+                        rigidbody_set.queue_body_for_writeback(handle.0);
                     }
                 }
                 _ => {
@@ -252,6 +261,9 @@ pub fn apply_rigid_body_user_changes(
                         rigidbody_set
                             .last_body_transform_set
                             .insert(handle.0, *global_transform);
+
+                        // Direct pose changes can wake or normalize the backend immediately.
+                        rigidbody_set.queue_body_for_writeback(handle.0);
                     }
                 }
             }
@@ -267,6 +279,9 @@ pub fn apply_rigid_body_user_changes(
             rb.set_linvel(velocity.linear, true);
             #[allow(clippy::useless_conversion)] // Need to convert if dim3 enabled
             rb.set_angvel(velocity.angular.into(), true);
+
+            // Rapier may ignore or normalize velocity for the current body type.
+            rigidbody_set.queue_body_for_writeback(handle.0);
         }
     }
 
@@ -286,6 +301,9 @@ pub fn apply_rigid_body_user_changes(
             }
 
             mass_modified.write(entity.into());
+
+            // Mass edits may wake the body or change the velocity Rapier accepts.
+            rigidbody_set.queue_body_for_writeback(handle.0);
         }
     }
 
@@ -296,6 +314,9 @@ pub fn apply_rigid_body_user_changes(
             .into_inner();
         if let Some(rb) = rigidbody_set.bodies.get_mut(handle.0) {
             rb.set_additional_solver_iterations(additional_solver_iters.0);
+
+            // Retain the body in case Rapier adjusts activation for the explicit edit.
+            rigidbody_set.queue_body_for_writeback(handle.0);
         }
     }
 
@@ -306,6 +327,9 @@ pub fn apply_rigid_body_user_changes(
             .into_inner();
         if let Some(rb) = rigidbody_set.bodies.get_mut(handle.0) {
             rb.set_locked_axes((*locked_axes).into(), true);
+
+            // Lock changes may wake the body or clamp backend velocity immediately.
+            rigidbody_set.queue_body_for_writeback(handle.0);
         }
     }
 
@@ -320,6 +344,9 @@ pub fn apply_rigid_body_user_changes(
             rb.add_force(forces.force, true);
             #[allow(clippy::useless_conversion)] // Need to convert if dim3 enabled
             rb.add_torque(forces.torque.into(), true);
+
+            // Force changes can wake a body even when this frame performs no substep.
+            rigidbody_set.queue_body_for_writeback(handle.0);
         }
     }
 
@@ -333,6 +360,9 @@ pub fn apply_rigid_body_user_changes(
             #[allow(clippy::useless_conversion)] // Need to convert if dim3 enabled
             rb.apply_torque_impulse(impulses.torque_impulse.into(), true);
             impulses.reset();
+
+            // Impulses mutate backend velocity before the simulation boundary.
+            rigidbody_set.queue_body_for_writeback(handle.0);
         }
     }
 
@@ -343,6 +373,9 @@ pub fn apply_rigid_body_user_changes(
             .into_inner();
         if let Some(rb) = rigidbody_set.bodies.get_mut(handle.0) {
             rb.set_gravity_scale(gravity_scale.0, true);
+
+            // Gravity changes may wake the body before the next simulation boundary.
+            rigidbody_set.queue_body_for_writeback(handle.0);
         }
     }
 
@@ -353,6 +386,9 @@ pub fn apply_rigid_body_user_changes(
             .into_inner();
         if let Some(rb) = rigidbody_set.bodies.get_mut(handle.0) {
             rb.enable_ccd(ccd.enabled);
+
+            // Retain any activation transition caused by the CCD mode change.
+            rigidbody_set.queue_body_for_writeback(handle.0);
         }
     }
 
@@ -363,6 +399,9 @@ pub fn apply_rigid_body_user_changes(
             .into_inner();
         if let Some(rb) = rigidbody_set.bodies.get_mut(handle.0) {
             rb.set_soft_ccd_prediction(soft_ccd.prediction);
+
+            // Retain any activation transition caused by the prediction change.
+            rigidbody_set.queue_body_for_writeback(handle.0);
         }
     }
 
@@ -373,6 +412,9 @@ pub fn apply_rigid_body_user_changes(
             .into_inner();
         if let Some(rb) = rigidbody_set.bodies.get_mut(handle.0) {
             rb.set_dominance_group(dominance.groups);
+
+            // Retain any activation transition caused by the dominance change.
+            rigidbody_set.queue_body_for_writeback(handle.0);
         }
     }
 
@@ -384,6 +426,9 @@ pub fn apply_rigid_body_user_changes(
         if let Some(rb) = rigidbody_set.bodies.get_mut(handle.0) {
             rb.set_linear_damping(damping.linear_damping);
             rb.set_angular_damping(damping.angular_damping);
+
+            // Retain any activation transition caused by the damping change.
+            rigidbody_set.queue_body_for_writeback(handle.0);
         }
     }
 
@@ -394,6 +439,9 @@ pub fn apply_rigid_body_user_changes(
             .into_inner();
         if let Some(co) = rigidbody_set.bodies.get_mut(handle.0) {
             co.set_enabled(false);
+
+            // Drain the disabled handle without querying or resurrecting its ECS entity.
+            rigidbody_set.queue_body_for_writeback(handle.0);
         }
     }
 }
@@ -401,7 +449,7 @@ pub fn apply_rigid_body_user_changes(
 /// System responsible for writing the result of the last simulation step into our `bevy_rapier`
 /// components and the [`GlobalTransform`] component.
 pub fn writeback_rigid_bodies(
-    mut rigid_body_sets: Query<&mut RapierRigidBodySet>,
+    mut rigid_body_sets: Query<(Entity, &mut RapierRigidBodySet)>,
     timestep_mode: Res<TimestepMode>,
     config: Query<&RapierConfiguration>,
     sim_to_render_time: Query<&SimulationToRenderTime>,
@@ -411,34 +459,71 @@ pub fn writeback_rigid_bodies(
         (With<RigidBody>, Without<RigidBodyDisabled>),
     >,
 ) {
-    for (handle, link, child_of, transform, mut interpolation, mut velocity, mut sleeping) in
-        writeback.iter_mut()
-    {
+    for (context_entity, mut rigid_body_set) in rigid_body_sets.iter_mut() {
+        // Keep explicit changes queued while a paused context deliberately suppresses writeback.
         let config = config
-            .get(link.0)
+            .get(context_entity)
             .expect("Could not get `RapierConfiguration`");
         if !config.physics_pipeline_active {
+            rigid_body_set.writeback_stats = Default::default();
             continue;
         }
-        let handle = handle.0;
 
-        let rigid_body_set = rigid_body_sets
-            .get_mut(link.0)
-            .expect(RAPIER_CONTEXT_EXPECT_ERROR)
-            .into_inner();
+        // Resolve context-local interpolation state once before draining its reusable candidate list.
         let sim_to_render_time = sim_to_render_time
-            .get(link.0)
+            .get(context_entity)
             .expect("Could not get `SimulationToRenderTime`");
-        // TODO: do this the other way round: iterate through Rapier’s RigidBodySet on the active bodies,
-        // and update the components accordingly. That way, we don’t have to iterate through the entities that weren’t changed
-        // by physics (for example because they are sleeping).
-        if let Some(rb) = rigid_body_set.bodies.get(handle) {
-            let mut interpolated_pos = utils::iso_to_transform(rb.position());
 
+        // Move the allocation out so field bookkeeping can mutate the context during the drain.
+        let mut bodies_to_writeback = std::mem::take(&mut rigid_body_set.bodies_to_writeback);
+        rigid_body_set.bodies_to_writeback_set.clear();
+        let mut stats = crate::plugin::context::RigidBodyWritebackStats {
+            visited: bodies_to_writeback.len(),
+            ..Default::default()
+        };
+
+        for handle in bodies_to_writeback.iter().copied() {
+            // Resolve the stable entity identity and snapshot backend output before borrowing ECS.
+            let Some(rb) = rigid_body_set.bodies.get(handle) else {
+                continue;
+            };
+            let entity = Entity::from_bits(rb.user_data as u64);
+            let body_position = *rb.position();
+            let body_velocity = Velocity {
+                linear: rb.linvel(),
+                #[cfg(feature = "dim3")]
+                angular: rb.angvel(),
+                #[cfg(feature = "dim2")]
+                angular: rb.angvel(),
+            };
+            let body_sleeping = rb.is_sleeping();
+
+            // Reject stale generations, context moves, disabled bodies, and removed ECS entities.
+            let Ok((
+                entity_handle,
+                link,
+                child_of,
+                transform,
+                mut interpolation,
+                mut velocity,
+                mut sleeping,
+            )) = writeback.get_mut(entity)
+            else {
+                continue;
+            };
+            if entity_handle.0 != handle || link.0 != context_entity {
+                continue;
+            }
+            stats.resolved += 1;
+
+            // Reconstruct the render pose from the exact backend result and interpolation state.
+            let mut entity_changed = false;
+            let mut interpolated_pos = utils::iso_to_transform(&body_position);
             if let TimestepMode::Interpolated { dt, .. } = *timestep_mode {
                 if let Some(interpolation) = interpolation.as_deref_mut() {
                     if interpolation.end.is_none() {
-                        interpolation.end = Some(*rb.position());
+                        interpolation.end = Some(body_position);
+                        entity_changed = true;
                     }
 
                     if let Some(interpolated) =
@@ -450,26 +535,14 @@ pub fn writeback_rigid_bodies(
             }
 
             if let Some(mut transform) = transform {
-                // NOTE: Rapier's `RigidBody` doesn't know its own scale as it is encoded
-                //       directly within its collider, so we have to retrieve it from
-                //       the scale of its bevy transform.
+                // Rapier stores collider scale rather than body scale, so preserve the ECS value.
                 interpolated_pos = interpolated_pos.with_scale(transform.scale);
 
-                // NOTE: we query the parent’s global transform here, which is a bit
-                //       unfortunate (performance-wise). An alternative would be to
-                //       deduce the parent’s global transform from the current entity’s
-                //       global transform. However, this makes it nearly impossible
-                //       (because of rounding errors) to predict the exact next value this
-                //       entity’s global transform will get after the next transform
-                //       propagation, which breaks our transform modification detection
-                //       that we do to detect if the user’s transform has to be written
-                //       into the rigid-body.
+                // Parent-space reconstruction must use the live parent transform so the next
+                // propagation produces the exact global value used for user-edit detection.
                 if let Some(parent_global_transform) =
                     child_of.and_then(|c| global_transforms.get(c.parent()).ok())
                 {
-                    // We need to compute the new local transform such that:
-                    // curr_parent_global_transform * new_transform = interpolated_pos
-                    // new_transform = curr_parent_global_transform.inverse() * interpolated_pos
                     let (inverse_parent_scale, inverse_parent_rotation, inverse_parent_translation) =
                         parent_global_transform
                             .affine()
@@ -483,79 +556,75 @@ pub fn writeback_rigid_bodies(
                         * interpolated_pos.translation
                         + inverse_parent_translation;
 
-                    // In 2D, preserve the transform `z` component that may have been set by the user
+                    // Preserve the user-owned depth coordinate in the 2D bridge.
                     #[cfg(feature = "dim2")]
                     {
                         new_translation.z = transform.translation.z;
                     }
 
+                    // Avoid waking Bevy change detection when the published pose is unchanged.
                     if transform.rotation != new_rotation
                         || transform.translation != new_translation
                     {
-                        // NOTE: we write the new value only if there was an
-                        //       actual change, in order to not trigger bevy’s
-                        //       change tracking when the values didn’t change.
                         transform.rotation = new_rotation;
                         transform.translation = new_translation;
+                        entity_changed = true;
                     }
 
-                    // NOTE: we need to compute the result of the next transform propagation
-                    //       to make sure that our change detection for transforms is exact
-                    //       despite rounding errors.
+                    // Store the exact next propagated value so bridge output remains distinct from
+                    // a subsequent user-authored GlobalTransform edit despite rounding.
                     let new_global_transform = parent_global_transform.mul_transform(*transform);
-
                     rigid_body_set
                         .last_body_transform_set
                         .insert(handle, new_global_transform);
                 } else {
-                    // In 2D, preserve the transform `z` component that may have been set by the user
+                    // Preserve the user-owned depth coordinate in the 2D bridge.
                     #[cfg(feature = "dim2")]
                     {
                         interpolated_pos.translation.z = transform.translation.z;
                     }
 
+                    // Avoid waking Bevy change detection when the published pose is unchanged.
                     if transform.rotation != interpolated_pos.rotation
                         || transform.translation != interpolated_pos.translation
                     {
-                        // NOTE: we write the new value only if there was an
-                        //       actual change, in order to not trigger bevy’s
-                        //       change tracking when the values didn’t change.
                         transform.rotation = interpolated_pos.rotation;
                         transform.translation = interpolated_pos.translation;
+                        entity_changed = true;
                     }
 
+                    // Preserve the private transform-edit discriminator on the active path.
                     rigid_body_set
                         .last_body_transform_set
                         .insert(handle, GlobalTransform::from(interpolated_pos));
                 }
             }
 
+            // Publish only backend velocity differences so settled candidates stay change-silent.
             if let Some(velocity) = &mut velocity {
-                let new_vel = Velocity {
-                    linear: rb.linvel(),
-                    #[cfg(feature = "dim3")]
-                    angular: rb.angvel(),
-                    #[cfg(feature = "dim2")]
-                    angular: rb.angvel(),
-                };
-
-                // NOTE: we write the new value only if there was an
-                //       actual change, in order to not trigger bevy’s
-                //       change tracking when the values didn’t change.
-                if **velocity != new_vel {
-                    **velocity = new_vel;
+                if **velocity != body_velocity {
+                    **velocity = body_velocity;
+                    entity_changed = true;
                 }
             }
 
+            // Publish the final active-to-sleep transition captured before the body left its island.
             if let Some(sleeping) = &mut sleeping {
-                // NOTE: we write the new value only if there was an
-                //       actual change, in order to not trigger bevy’s
-                //       change tracking when the values didn’t change.
-                if sleeping.sleeping != rb.is_sleeping() {
-                    sleeping.sleeping = rb.is_sleeping();
+                if sleeping.sleeping != body_sleeping {
+                    sleeping.sleeping = body_sleeping;
+                    entity_changed = true;
                 }
+            }
+
+            if entity_changed {
+                stats.changed += 1;
             }
         }
+
+        // Reuse the drained allocation and expose cardinalities without a second world traversal.
+        bodies_to_writeback.clear();
+        rigid_body_set.bodies_to_writeback = bodies_to_writeback;
+        rigid_body_set.writeback_stats = stats;
     }
 }
 
@@ -678,6 +747,8 @@ pub fn init_rigid_bodies(
             continue;
         };
         let handle = rigidbody_set.bodies.insert(rb);
+        // Bootstrap bodies can be fixed or sleeping and therefore never enter an active island.
+        rigidbody_set.queue_body_for_writeback(handle);
         commands
             .entity(entity)
             .insert(RapierRigidBodyHandle(handle));
@@ -710,12 +781,11 @@ pub fn apply_initial_rigid_body_impulses(
             context.get_mut(link.0).expect(RAPIER_CONTEXT_EXPECT_ERROR);
         let rigidbody_set = &mut *rigidbody_set;
 
-        let bodies = &mut rigidbody_set.bodies;
-        if let Some(rb) = rigidbody_set
-            .entity2body
-            .get(&entity)
-            .and_then(|h| bodies.get_mut(*h))
-        {
+        // Resolve the just-created handle before mutating its mass and velocity.
+        let Some(handle) = rigidbody_set.entity2body.get(&entity).copied() else {
+            continue;
+        };
+        if let Some(rb) = rigidbody_set.bodies.get_mut(handle) {
             // Make sure the mass-properties are computed.
             rb.recompute_mass_properties_from_colliders(&context_colliders.colliders);
             // Apply the impulse.
@@ -725,6 +795,931 @@ pub fn apply_initial_rigid_body_impulses(
             rb.apply_torque_impulse(impulse.torque_impulse.into(), false);
 
             impulse.reset();
+
+            // Initial impulses mutate backend velocity even when this frame has no substep.
+            rigidbody_set.queue_body_for_writeback(handle);
         }
+    }
+}
+
+#[cfg(all(test, feature = "dim3"))]
+mod tests {
+    use super::*;
+    use crate::plugin::context::{
+        DefaultRapierContext, RapierContextJoints, RapierContextSimulation,
+    };
+    use crate::plugin::{NoUserData, RapierContextInitialization, RapierPhysicsPlugin};
+    use bevy::time::{TimePlugin, TimeUpdateStrategy};
+    use std::time::Duration;
+
+    fn test_app(timestep_mode: TimestepMode, frame_duration: Duration) -> App {
+        // Reproduce the production schedule with deterministic time and the smallest Bevy plugins.
+        let mut app = App::new();
+        app.add_plugins((
+            TransformPlugin,
+            TimePlugin,
+            RapierPhysicsPlugin::<NoUserData>::default(),
+        ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(frame_duration));
+        app.insert_resource(timestep_mode);
+        app.finish();
+        app
+    }
+
+    fn two_context_test_app() -> (App, Entity, Entity) {
+        // Disable automatic context creation so two context-local queues can be observed directly.
+        let mut app = App::new();
+        app.insert_resource(RapierContextInitialization::NoAutomaticRapierContext);
+        app.add_plugins((
+            TransformPlugin,
+            TimePlugin,
+            RapierPhysicsPlugin::<NoUserData>::default(),
+        ));
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+            1.0 / 60.0,
+        )));
+        app.finish();
+
+        // Give each context an independent backend whose first body reuses the same raw handle.
+        let context_a = app
+            .world_mut()
+            .spawn((
+                RapierContextSimulation::default(),
+                RapierConfiguration::new(1.0),
+                DefaultRapierContext,
+            ))
+            .id();
+        let context_b = app
+            .world_mut()
+            .spawn((
+                RapierContextSimulation::default(),
+                RapierConfiguration::new(1.0),
+            ))
+            .id();
+        (app, context_a, context_b)
+    }
+
+    fn default_context_entity(app: &mut App) -> Entity {
+        // Resolve the plugin-created context without assuming a stable Bevy entity generation.
+        let world = app.world_mut();
+        let mut query = world.query_filtered::<Entity, With<DefaultRapierContext>>();
+        query.single(world).expect("default Rapier context")
+    }
+
+    fn assert_root_body_full_scan_parity(app: &mut App) {
+        // Snapshot every enabled root body exactly as the legacy full-scan writeback would visit it.
+        let rows = {
+            let world = app.world_mut();
+            let mut query = world.query_filtered::<(
+                Entity,
+                &RapierRigidBodyHandle,
+                &RapierContextEntityLink,
+                &Transform,
+                &Velocity,
+                &Sleeping,
+            ), (
+                With<RigidBody>,
+                Without<RigidBodyDisabled>,
+                Without<ChildOf>,
+            )>();
+            query
+                .iter(world)
+                .map(|(entity, handle, link, transform, velocity, sleeping)| {
+                    (entity, handle.0, link.0, *transform, *velocity, *sleeping)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Compare the optimized output for every legacy candidate with the exact backend state.
+        for (entity, handle, context_entity, transform, velocity, sleeping) in rows {
+            let rigidbody_set = app
+                .world()
+                .get::<RapierRigidBodySet>(context_entity)
+                .expect("body context");
+            let body = rigidbody_set
+                .bodies
+                .get(handle)
+                .unwrap_or_else(|| panic!("backend body for {entity}"));
+            let expected_transform = utils::iso_to_transform(body.position());
+            approx::assert_relative_eq!(
+                transform.translation,
+                expected_transform.translation,
+                epsilon = 1.0e-5
+            );
+            approx::assert_relative_eq!(
+                transform.rotation,
+                expected_transform.rotation,
+                epsilon = 1.0e-5
+            );
+            approx::assert_relative_eq!(velocity.linear, body.linvel(), epsilon = 1.0e-5);
+            approx::assert_relative_eq!(velocity.angular, body.angvel(), epsilon = 1.0e-5);
+            assert_eq!(sleeping.sleeping, body.is_sleeping());
+        }
+    }
+
+    #[test]
+    fn direct_context_stepping_queues_active_results_once() {
+        // Build the four context stores directly so this test cannot rely on the plugin's scheduled
+        // wrapper to retain active bodies as a side effect.
+        let mut simulation = RapierContextSimulation::default();
+        let mut colliders = RapierContextColliders::default();
+        let mut joints = RapierContextJoints::default();
+        let mut rigidbody_set = RapierRigidBodySet::default();
+        let handle = rigidbody_set.bodies.insert(
+            RigidBodyBuilder::dynamic()
+                .linvel(Vec3::X)
+                .user_data(Entity::PLACEHOLDER.to_bits() as u128)
+                .build(),
+        );
+        let mut time = Time::default();
+        time.advance_by(Duration::from_secs_f32(1.0 / 60.0));
+        let mut sim_to_render_time = SimulationToRenderTime::default();
+
+        // Step through the public context method twice without draining writeback in between.
+        for _ in 0..2 {
+            simulation.step_simulation(
+                &mut colliders,
+                &mut joints,
+                &mut rigidbody_set,
+                Vec3::ZERO,
+                TimestepMode::Variable {
+                    max_dt: 1.0 / 60.0,
+                    time_scale: 1.0,
+                    substeps: 1,
+                },
+                None,
+                &(),
+                &time,
+                &mut sim_to_render_time,
+                None,
+            );
+        }
+
+        // Direct stepping retains the result, and insertion-time dedup keeps one exact handle.
+        assert_eq!(rigidbody_set.bodies_to_writeback.as_slice(), &[handle]);
+        assert_eq!(rigidbody_set.bodies_to_writeback_set.len(), 1);
+    }
+
+    #[test]
+    fn active_writeback_matches_full_scan_oracle_and_skips_settled_bodies() {
+        let mut app = test_app(
+            TimestepMode::Variable {
+                max_dt: 1.0 / 60.0,
+                time_scale: 1.0,
+                substeps: 1,
+            },
+            Duration::from_secs_f32(1.0 / 60.0),
+        );
+
+        // Seed a settled resident set large enough to expose an accidental all-body traversal.
+        let mut bodies = Vec::new();
+        for index in 0..64 {
+            let body = app
+                .world_mut()
+                .spawn((
+                    RigidBody::Dynamic,
+                    Collider::ball(0.25),
+                    Transform::from_xyz(index as f32 * 2.0, 0.0, 0.0),
+                    Velocity::default(),
+                    Sleeping {
+                        sleeping: true,
+                        ..Default::default()
+                    },
+                ))
+                .id();
+            bodies.push(body);
+        }
+
+        // Drain bootstrap work, then require the unchanged frame to visit no resident body.
+        app.update();
+        app.update();
+        let context_entity = default_context_entity(&mut app);
+        assert_eq!(
+            app.world()
+                .get::<RapierRigidBodySet>(context_entity)
+                .unwrap()
+                .writeback_stats()
+                .visited,
+            0
+        );
+        assert_root_body_full_scan_parity(&mut app);
+
+        // Wake one body through ordinary ECS inputs and compare all entities with the full-scan oracle.
+        let active = bodies[17];
+        app.world_mut()
+            .entity_mut(active)
+            .get_mut::<Sleeping>()
+            .unwrap()
+            .sleeping = false;
+        app.world_mut()
+            .entity_mut(active)
+            .get_mut::<Velocity>()
+            .unwrap()
+            .linear = Vec3::X * 3.0;
+        app.update();
+        let stats = app
+            .world()
+            .get::<RapierRigidBodySet>(context_entity)
+            .unwrap()
+            .writeback_stats();
+        assert_eq!(stats.resolved, stats.visited);
+        assert!(stats.visited < bodies.len());
+        assert_root_body_full_scan_parity(&mut app);
+
+        // Remove motion and gravity first so prior-frame velocity feedback cannot wake the body
+        // after the bridge deliberately processes sleeping changes before velocity changes.
+        app.world_mut().entity_mut(active).insert(GravityScale(0.0));
+        app.world_mut()
+            .entity_mut(active)
+            .get_mut::<Velocity>()
+            .unwrap()
+            .linear = Vec3::ZERO;
+        app.update();
+
+        // Publish the final active-to-sleep state on the next explicit transition frame.
+        app.world_mut()
+            .entity_mut(active)
+            .get_mut::<Sleeping>()
+            .unwrap()
+            .sleeping = true;
+        app.update();
+        assert_root_body_full_scan_parity(&mut app);
+        assert!(
+            app.world()
+                .entity(active)
+                .get::<Sleeping>()
+                .unwrap()
+                .sleeping
+        );
+    }
+
+    #[test]
+    fn kinematic_inputs_write_back_during_a_zero_substep_frame() {
+        let mut app = test_app(
+            TimestepMode::Interpolated {
+                dt: 1.0,
+                time_scale: 1.0,
+                substeps: 2,
+            },
+            Duration::from_secs_f32(0.25),
+        );
+
+        // Create one body for each kinematic mode and advance once to enter a render-only interval.
+        let position_based = app
+            .world_mut()
+            .spawn((
+                RigidBody::KinematicPositionBased,
+                Transform::from_xyz(1.0, 0.0, 0.0),
+                Velocity::default(),
+                Sleeping::default(),
+            ))
+            .id();
+        let velocity_based = app
+            .world_mut()
+            .spawn((
+                RigidBody::KinematicVelocityBased,
+                Transform::from_xyz(3.0, 0.0, 0.0),
+                Velocity::default(),
+                Sleeping::default(),
+            ))
+            .id();
+        app.update();
+        app.update();
+        let context_entity = default_context_entity(&mut app);
+
+        // Author both input forms while the interpolation accumulator guarantees no Rapier step.
+        app.world_mut()
+            .entity_mut(position_based)
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation = Vec3::new(2.0, 1.0, 0.0);
+        app.world_mut()
+            .entity_mut(velocity_based)
+            .get_mut::<Velocity>()
+            .unwrap()
+            .linear = Vec3::new(-2.0, 0.5, 0.0);
+        app.update();
+
+        // The explicit-input candidates exactly match legacy output despite executing no substep.
+        let stats = app
+            .world()
+            .get::<RapierRigidBodySet>(context_entity)
+            .unwrap()
+            .writeback_stats();
+        assert_eq!(stats.visited, 2);
+        assert_eq!(stats.resolved, 2);
+        assert_root_body_full_scan_parity(&mut app);
+
+        // A second render-only frame has neither new inputs nor interpolation opt-ins to publish.
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<RapierRigidBodySet>(context_entity)
+                .unwrap()
+                .writeback_stats()
+                .visited,
+            0
+        );
+    }
+
+    #[test]
+    fn explicit_body_input_families_deduplicate_to_one_candidate() {
+        let mut app = test_app(
+            TimestepMode::Interpolated {
+                dt: 1.0,
+                time_scale: 1.0,
+                substeps: 2,
+            },
+            Duration::from_secs_f32(0.25),
+        );
+
+        // Seed every body-input family on one fixed body, then drain its bootstrap candidate.
+        let body = app
+            .world_mut()
+            .spawn((
+                RigidBody::Fixed,
+                Transform::default(),
+                Velocity::default(),
+                AdditionalMassProperties::Mass(1.0),
+                AdditionalSolverIterations(0),
+                LockedAxes::empty(),
+                ExternalForce::default(),
+                ExternalImpulse::default(),
+                GravityScale(1.0),
+                Ccd::disabled(),
+                SoftCcd::default(),
+                Dominance::group(0),
+                Damping::default(),
+                Sleeping {
+                    sleeping: true,
+                    ..Default::default()
+                },
+            ))
+            .id();
+        app.update();
+        app.update();
+        let context_entity = default_context_entity(&mut app);
+
+        // Change type, pose, velocity, mass, locks, force, impulse, gravity, CCD, dominance,
+        // damping, solver iterations, and activation during one zero-substep frame.
+        *app.world_mut()
+            .entity_mut(body)
+            .get_mut::<RigidBody>()
+            .unwrap() = RigidBody::KinematicVelocityBased;
+        app.world_mut()
+            .entity_mut(body)
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation = Vec3::new(2.0, 3.0, 4.0);
+        app.world_mut()
+            .entity_mut(body)
+            .get_mut::<Velocity>()
+            .unwrap()
+            .linear = Vec3::new(1.0, 2.0, 3.0);
+        *app.world_mut()
+            .entity_mut(body)
+            .get_mut::<AdditionalMassProperties>()
+            .unwrap() = AdditionalMassProperties::Mass(2.0);
+        app.world_mut()
+            .entity_mut(body)
+            .get_mut::<AdditionalSolverIterations>()
+            .unwrap()
+            .0 = 3;
+        *app.world_mut()
+            .entity_mut(body)
+            .get_mut::<LockedAxes>()
+            .unwrap() = LockedAxes::TRANSLATION_LOCKED_X;
+        app.world_mut()
+            .entity_mut(body)
+            .get_mut::<ExternalForce>()
+            .unwrap()
+            .force = Vec3::Y * 2.0;
+        app.world_mut()
+            .entity_mut(body)
+            .get_mut::<ExternalImpulse>()
+            .unwrap()
+            .impulse = Vec3::X * 3.0;
+        app.world_mut()
+            .entity_mut(body)
+            .get_mut::<GravityScale>()
+            .unwrap()
+            .0 = 0.5;
+        app.world_mut()
+            .entity_mut(body)
+            .get_mut::<Ccd>()
+            .unwrap()
+            .enabled = true;
+        app.world_mut()
+            .entity_mut(body)
+            .get_mut::<SoftCcd>()
+            .unwrap()
+            .prediction = 0.25;
+        app.world_mut()
+            .entity_mut(body)
+            .get_mut::<Dominance>()
+            .unwrap()
+            .groups = 3;
+        {
+            let mut body_entity = app.world_mut().entity_mut(body);
+            let mut damping = body_entity.get_mut::<Damping>().unwrap();
+            damping.linear_damping = 0.1;
+            damping.angular_damping = 0.2;
+        }
+        app.world_mut()
+            .entity_mut(body)
+            .get_mut::<Sleeping>()
+            .unwrap()
+            .sleeping = false;
+        app.update();
+
+        // Every explicit path converges on one handle and produces the legacy full-scan result.
+        let stats = app
+            .world()
+            .get::<RapierRigidBodySet>(context_entity)
+            .unwrap()
+            .writeback_stats();
+        assert_eq!(stats.visited, 1);
+        assert_eq!(stats.resolved, 1);
+        assert_root_body_full_scan_parity(&mut app);
+    }
+
+    #[test]
+    fn parent_space_writeback_preserves_scale_and_edit_detection() {
+        let mut app = test_app(
+            TimestepMode::Variable {
+                max_dt: 1.0 / 60.0,
+                time_scale: 1.0,
+                substeps: 1,
+            },
+            Duration::from_secs_f32(1.0 / 60.0),
+        );
+
+        // Build a scaled, rotated hierarchy around a fixed body so only explicit transforms can
+        // select it for writeback.
+        let parent = app
+            .world_mut()
+            .spawn(Transform::from_xyz(10.0, -2.0, 1.0).with_scale(Vec3::new(2.0, 3.0, 1.0)))
+            .id();
+        app.world_mut()
+            .entity_mut(parent)
+            .get_mut::<Transform>()
+            .unwrap()
+            .rotation = Quat::from_rotation_z(0.2);
+        let child_scale = Vec3::new(4.0, 5.0, 6.0);
+        let child = app
+            .world_mut()
+            .spawn((
+                RigidBody::Fixed,
+                Transform::from_xyz(1.0, 2.0, 0.5).with_scale(child_scale),
+                Velocity::default(),
+                Sleeping::default(),
+                ChildOf(parent),
+            ))
+            .id();
+        app.update();
+        app.update();
+        let context_entity = default_context_entity(&mut app);
+
+        // Move the parent and child locally so the resulting GlobalTransform is genuinely authored.
+        app.world_mut()
+            .entity_mut(parent)
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation += Vec3::new(3.0, 1.0, -2.0);
+        app.world_mut()
+            .entity_mut(child)
+            .get_mut::<Transform>()
+            .unwrap()
+            .translation = Vec3::new(-1.0, 1.5, 0.25);
+        let authored_global =
+            GlobalTransform::from(*app.world().entity(parent).get::<Transform>().unwrap())
+                .mul_transform(*app.world().entity(child).get::<Transform>().unwrap());
+        let expected_pose = utils::transform_to_iso(&authored_global.compute_transform());
+        app.update();
+
+        // The backend receives the authored global pose while parent-space reconstruction keeps
+        // the ECS-local scale, translation, and writeback discriminator intact.
+        let rigidbody_set = app
+            .world()
+            .get::<RapierRigidBodySet>(context_entity)
+            .unwrap();
+        let handle = rigidbody_set.entity2body()[&child];
+        let backend_pose = rigidbody_set.bodies.get(handle).unwrap().position();
+        approx::assert_relative_eq!(
+            backend_pose.translation,
+            expected_pose.translation,
+            epsilon = 1.0e-5
+        );
+        approx::assert_relative_eq!(
+            backend_pose.rotation,
+            expected_pose.rotation,
+            epsilon = 1.0e-5
+        );
+        assert_eq!(
+            app.world().entity(child).get::<Transform>().unwrap().scale,
+            child_scale
+        );
+        assert_eq!(rigidbody_set.writeback_stats().visited, 1);
+
+        // The next unchanged frame must not misclassify bridge-authored hierarchy propagation as
+        // another user edit, and a fixed body is absent from active-island fallback.
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<RapierRigidBodySet>(context_entity)
+                .unwrap()
+                .writeback_stats()
+                .visited,
+            0
+        );
+    }
+
+    #[test]
+    fn collider_and_joint_lifecycle_queue_exact_fixed_endpoints() {
+        let mut app = test_app(
+            TimestepMode::Variable {
+                max_dt: 1.0 / 60.0,
+                time_scale: 1.0,
+                substeps: 1,
+            },
+            Duration::from_secs_f32(1.0 / 60.0),
+        );
+
+        // Fixed endpoints never enter Rapier's active island, isolating explicit collider and joint
+        // lifecycle candidates from physics-driven candidates.
+        let body_a = app
+            .world_mut()
+            .spawn((
+                RigidBody::Fixed,
+                Transform::default(),
+                Velocity::default(),
+                Sleeping::default(),
+            ))
+            .id();
+        let body_b = app
+            .world_mut()
+            .spawn((
+                RigidBody::Fixed,
+                Transform::from_xyz(3.0, 0.0, 0.0),
+                Velocity::default(),
+                Sleeping::default(),
+            ))
+            .id();
+        app.update();
+        app.update();
+        let context_entity = default_context_entity(&mut app);
+
+        // Add, change, and remove an attached collider; each operation selects only its parent.
+        let collider = app
+            .world_mut()
+            .spawn((Collider::ball(0.5), Transform::default(), ChildOf(body_a)))
+            .id();
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<RapierRigidBodySet>(context_entity)
+                .unwrap()
+                .writeback_stats()
+                .visited,
+            1
+        );
+        *app.world_mut()
+            .entity_mut(collider)
+            .get_mut::<Collider>()
+            .unwrap() = Collider::cuboid(0.5, 0.75, 1.0);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<RapierRigidBodySet>(context_entity)
+                .unwrap()
+                .writeback_stats()
+                .visited,
+            1
+        );
+        app.world_mut().despawn(collider);
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<RapierRigidBodySet>(context_entity)
+                .unwrap()
+                .writeback_stats()
+                .visited,
+            1
+        );
+
+        // Add, change, and remove an impulse joint; every operation selects both exact endpoints.
+        app.world_mut()
+            .entity_mut(body_b)
+            .insert(ImpulseJoint::new(body_a, FixedJointBuilder::new()));
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<RapierRigidBodySet>(context_entity)
+                .unwrap()
+                .writeback_stats()
+                .visited,
+            2
+        );
+        *app.world_mut()
+            .entity_mut(body_b)
+            .get_mut::<ImpulseJoint>()
+            .unwrap() = ImpulseJoint::new(
+            body_a,
+            FixedJointBuilder::new().local_anchor1(Vec3::X * 0.25),
+        );
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<RapierRigidBodySet>(context_entity)
+                .unwrap()
+                .writeback_stats()
+                .visited,
+            2
+        );
+        app.world_mut().entity_mut(body_b).remove::<ImpulseJoint>();
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<RapierRigidBodySet>(context_entity)
+                .unwrap()
+                .writeback_stats()
+                .visited,
+            2
+        );
+        assert_root_body_full_scan_parity(&mut app);
+    }
+
+    #[test]
+    fn sleeping_interpolation_advances_across_render_only_frames() {
+        let mut app = test_app(
+            TimestepMode::Interpolated {
+                dt: 1.0,
+                time_scale: 1.0,
+                substeps: 2,
+            },
+            Duration::from_secs_f32(0.25),
+        );
+
+        // Bootstrap a sleeping body at the final pose; Bevy's first manual-time update has zero
+        // delta, and the next one lets Rapier classify it outside the active island.
+        let body = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Collider::ball(0.25),
+                Transform::from_xyz(4.0, 0.0, 0.0),
+                TransformInterpolation::default(),
+                Velocity::default(),
+                GravityScale(0.0),
+                Sleeping {
+                    sleeping: true,
+                    ..Default::default()
+                },
+            ))
+            .id();
+        app.update();
+        app.update();
+        let context_entity = default_context_entity(&mut app);
+        let handle = app
+            .world()
+            .get::<RapierRigidBodySet>(context_entity)
+            .unwrap()
+            .entity2body()[&body];
+
+        // Establish that active-island traversal alone cannot select the interpolation body.
+        assert!(!app
+            .world()
+            .get::<RapierContextSimulation>(context_entity)
+            .unwrap()
+            .islands
+            .active_bodies()
+            .any(|active| active == handle));
+
+        // Recreate a pending interpolation interval while leaving the sleeping backend at its
+        // final pose; only the interpolation candidate path can now publish render progress.
+        let backend_pose = *app
+            .world()
+            .get::<RapierRigidBodySet>(context_entity)
+            .unwrap()
+            .bodies
+            .get(handle)
+            .unwrap()
+            .position();
+        {
+            let mut body_entity = app.world_mut().entity_mut(body);
+            let mut interpolation = body_entity.get_mut::<TransformInterpolation>().unwrap();
+            interpolation.start = Some(utils::transform_to_iso(&Transform::default()));
+            interpolation.end = Some(backend_pose);
+        }
+        app.world_mut()
+            .get_mut::<SimulationToRenderTime>(context_entity)
+            .unwrap()
+            .diff = -1.0;
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+            0.25,
+        )));
+
+        // Consume four render-only frames and require monotonic progress to the sleeping pose.
+        app.update();
+        let first_x = app
+            .world()
+            .entity(body)
+            .get::<Transform>()
+            .unwrap()
+            .translation
+            .x;
+        app.update();
+        let second_x = app
+            .world()
+            .entity(body)
+            .get::<Transform>()
+            .unwrap()
+            .translation
+            .x;
+        app.update();
+        let third_x = app
+            .world()
+            .entity(body)
+            .get::<Transform>()
+            .unwrap()
+            .translation
+            .x;
+        app.update();
+        let fourth_x = app
+            .world()
+            .entity(body)
+            .get::<Transform>()
+            .unwrap()
+            .translation
+            .x;
+
+        // Every frame visited the one opted-in sleeper without reactivating or moving its backend.
+        let rigidbody_set = app
+            .world()
+            .get::<RapierRigidBodySet>(context_entity)
+            .unwrap();
+        assert!(second_x > first_x);
+        assert!(third_x > second_x);
+        assert!(fourth_x > third_x);
+        approx::assert_relative_eq!(fourth_x, backend_pose.translation.x, epsilon = 1.0e-5);
+        assert_eq!(rigidbody_set.writeback_stats().visited, 1);
+        assert!(app.world().entity(body).get::<Sleeping>().unwrap().sleeping);
+    }
+
+    #[test]
+    fn paused_context_reuses_storage_and_rejects_removed_handle_generations() {
+        let (mut app, context_a, context_b) = two_context_test_app();
+
+        // Bootstrap the first body in each context so their local handle values collide exactly.
+        let body_a = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Transform::default(),
+                Velocity::default(),
+                Sleeping::default(),
+                RapierContextEntityLink(context_a),
+            ))
+            .id();
+        let body_b = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Transform::default(),
+                Velocity::default(),
+                Sleeping::default(),
+                RapierContextEntityLink(context_b),
+            ))
+            .id();
+        app.update();
+        let handle_a = app
+            .world()
+            .get::<RapierRigidBodySet>(context_a)
+            .unwrap()
+            .entity2body()[&body_a];
+        let removed_handle = app
+            .world()
+            .get::<RapierRigidBodySet>(context_b)
+            .unwrap()
+            .entity2body()[&body_b];
+        assert_eq!(handle_a, removed_handle);
+
+        // Pause only B and repeat one explicit edit to prove pending work remains context-local and unique.
+        app.world_mut()
+            .get_mut::<RapierConfiguration>(context_b)
+            .unwrap()
+            .physics_pipeline_active = false;
+        for speed in 1..=32 {
+            app.world_mut()
+                .entity_mut(body_b)
+                .get_mut::<Velocity>()
+                .unwrap()
+                .linear = Vec3::X * speed as f32;
+            app.update();
+        }
+        assert_eq!(
+            app.world()
+                .get::<RapierRigidBodySet>(context_b)
+                .unwrap()
+                .bodies_to_writeback
+                .as_slice(),
+            &[removed_handle]
+        );
+
+        // Remove the pending body while paused, then reuse its slot for a different generation.
+        app.world_mut().despawn(body_b);
+        app.update();
+        assert!(app
+            .world()
+            .get::<RapierRigidBodySet>(context_b)
+            .unwrap()
+            .bodies_to_writeback
+            .is_empty());
+        let replacement = app
+            .world_mut()
+            .spawn((
+                RigidBody::Fixed,
+                Transform::default(),
+                Velocity::linear(Vec3::X * 9.0),
+                Sleeping {
+                    sleeping: true,
+                    ..Default::default()
+                },
+                RapierContextEntityLink(context_b),
+            ))
+            .id();
+        app.update();
+        let replacement_handle = app
+            .world()
+            .get::<RapierRigidBodySet>(context_b)
+            .unwrap()
+            .entity2body()[&replacement];
+        let (removed_index, removed_generation) = removed_handle.into_raw_parts();
+        let (replacement_index, replacement_generation) = replacement_handle.into_raw_parts();
+        assert_eq!(removed_index, replacement_index);
+        assert_ne!(removed_generation, replacement_generation);
+
+        // Inject the stale generation beside real bootstrap work and resume only this context.
+        {
+            let mut rigidbody_set = app
+                .world_mut()
+                .get_mut::<RapierRigidBodySet>(context_b)
+                .unwrap();
+            rigidbody_set.queue_body_for_writeback(removed_handle);
+        }
+        app.world_mut()
+            .get_mut::<RapierConfiguration>(context_b)
+            .unwrap()
+            .physics_pipeline_active = true;
+        app.update();
+
+        // The stale handle is visited but cannot resolve or overwrite the replacement entity.
+        let rigidbody_set = app.world().get::<RapierRigidBodySet>(context_b).unwrap();
+        let stats = rigidbody_set.writeback_stats();
+        assert_eq!(stats.visited, 2);
+        assert_eq!(stats.resolved, 1);
+        assert!(rigidbody_set.bodies_to_writeback.is_empty());
+        assert_eq!(
+            app.world()
+                .entity(replacement)
+                .get::<Velocity>()
+                .unwrap()
+                .linear,
+            Vec3::ZERO
+        );
+    }
+
+    #[cfg(feature = "serde-serialize")]
+    #[test]
+    fn serialized_context_rebuilds_empty_transient_writeback_state() {
+        // Populate durable Rapier state and every transient bridge index before serialization.
+        let mut rigidbody_set = RapierRigidBodySet::default();
+        let entity = Entity::PLACEHOLDER;
+        let handle = rigidbody_set.bodies.insert(
+            RigidBodyBuilder::fixed()
+                .user_data(entity.to_bits() as u128)
+                .build(),
+        );
+        rigidbody_set.entity2body.insert(entity, handle);
+        rigidbody_set
+            .last_body_transform_set
+            .insert(handle, GlobalTransform::IDENTITY);
+        rigidbody_set.queue_body_for_writeback(handle);
+        rigidbody_set.writeback_stats = crate::plugin::context::RigidBodyWritebackStats {
+            visited: 1,
+            resolved: 1,
+            changed: 1,
+        };
+
+        // Round-trip only the serialized contract; skipped indexes must default rather than retain
+        // stale handles or diagnostics from the source world.
+        let serialized = serde_json::to_string(&rigidbody_set).unwrap();
+        let restored: RapierRigidBodySet = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored.bodies.len(), 1);
+        assert!(restored.entity2body.is_empty());
+        assert!(restored.last_body_transform_set.is_empty());
+        assert!(restored.bodies_to_writeback.is_empty());
+        assert!(restored.bodies_to_writeback_set.is_empty());
+        assert_eq!(restored.writeback_stats(), Default::default());
     }
 }

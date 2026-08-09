@@ -86,7 +86,7 @@ pub fn apply_scale(
 
 /// System responsible for applying changes the user made to a collider-related component.
 pub fn apply_collider_user_changes(
-    mut context: Query<(&RapierRigidBodySet, &mut RapierContextColliders)>,
+    mut context: Query<(&mut RapierRigidBodySet, &mut RapierContextColliders)>,
     config: Query<&RapierConfiguration>,
     (changed_collider_transforms, child_of_query, transform_query): (
         Query<
@@ -144,16 +144,22 @@ pub fn apply_collider_user_changes(
     mut mass_modified: MessageWriter<MassModifiedEvent>,
 ) {
     for (rapier_entity, handle, transform) in changed_collider_transforms.iter() {
-        let (rigidbody_set, mut context_colliders) = context
+        let (mut rigidbody_set, mut context_colliders) = context
             .get_mut(rapier_entity.rapier_context_link.0)
             .expect(RAPIER_CONTEXT_EXPECT_ERROR);
+
+        // Snapshot the attached parent before mutating the collider through a separate borrow.
+        let parent_handle = context_colliders
+            .colliders
+            .get(handle.0)
+            .and_then(|collider| collider.parent());
         if context_colliders
-            .collider_parent(rigidbody_set, rapier_entity.entity)
+            .collider_parent(&rigidbody_set, rapier_entity.entity)
             .is_some()
         {
             let (_, collider_position) = collider_offset(
                 rapier_entity.entity,
-                rigidbody_set,
+                &rigidbody_set,
                 &child_of_query,
                 &transform_query,
             );
@@ -176,10 +182,15 @@ pub fn apply_collider_user_changes(
                 co.set_position(utils::transform_to_iso(&transform.compute_transform()));
             }
         }
+
+        // Attached collider edits can wake or renormalize their parent outside a substep.
+        if let Some(parent_handle) = parent_handle {
+            rigidbody_set.queue_body_for_writeback(parent_handle);
+        }
     }
 
     for (rapier_entity, handle, shape) in changed_shapes.iter() {
-        let (rigidbody_set, mut context_colliders) = context
+        let (mut rigidbody_set, mut context_colliders) = context
             .get_mut(rapier_entity.rapier_context_link.0)
             .expect(RAPIER_CONTEXT_EXPECT_ERROR);
         let config = config.get(rapier_entity.rapier_context_link.0).unwrap();
@@ -192,6 +203,9 @@ pub fn apply_collider_user_changes(
                 if let Some(body_entity) = rigidbody_set.rigid_body_entity(body) {
                     mass_modified.write(body_entity.into());
                 }
+
+                // Shape changes can alter the parent's mass and activation outside a substep.
+                rigidbody_set.queue_body_for_writeback(body);
             }
         }
     }
@@ -280,11 +294,17 @@ pub fn apply_collider_user_changes(
     }
 
     for (rapier_entity, handle, _) in changed_disabled.iter() {
-        let (_, mut context_colliders) = context
+        let (mut rigidbody_set, mut context_colliders) = context
             .get_mut(rapier_entity.rapier_context_link.0)
             .expect(RAPIER_CONTEXT_EXPECT_ERROR);
         if let Some(co) = context_colliders.colliders.get_mut(handle.0) {
+            let parent = co.parent();
             co.set_enabled(false);
+
+            // Preserve any parent activation transition while the collider is disabled.
+            if let Some(parent) = parent {
+                rigidbody_set.queue_body_for_writeback(parent);
+            }
         }
     }
 
@@ -298,7 +318,7 @@ pub fn apply_collider_user_changes(
     }
 
     for (rapier_entity, handle, mprops) in changed_collider_mass_props.iter() {
-        let (rigidbody_set, mut context_colliders) = context
+        let (mut rigidbody_set, mut context_colliders) = context
             .get_mut(rapier_entity.rapier_context_link.0)
             .expect(RAPIER_CONTEXT_EXPECT_ERROR);
         if let Some(co) = context_colliders.colliders.get_mut(handle.0) {
@@ -314,6 +334,9 @@ pub fn apply_collider_user_changes(
                 if let Some(body_entity) = rigidbody_set.rigid_body_entity(body) {
                     mass_modified.write(body_entity.into());
                 }
+
+                // Collider mass changes can alter the parent's activation outside a substep.
+                rigidbody_set.queue_body_for_writeback(body);
             }
         }
     }
@@ -490,6 +513,9 @@ pub fn init_colliders(
                     ));
                 }
             }
+
+            // New attached colliders can normalize a fixed or sleeping parent's state.
+            rigidbody_set.queue_body_for_writeback(body_handle);
             handle
         } else {
             let global_transform = global_transform.cloned().unwrap_or_default();

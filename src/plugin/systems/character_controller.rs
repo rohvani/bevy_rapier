@@ -152,7 +152,18 @@ pub fn update_character_controls(
                     &*character_shape,
                     character_mass,
                     collisions.iter(),
-                )
+                );
+
+                // Controller impulses happen outside the physics pipeline, so retain every hit
+                // parent explicitly even on a render-only or paused simulation frame.
+                for handle in collisions.iter().filter_map(|collision| {
+                    context_colliders
+                        .colliders
+                        .get(collision.handle)
+                        .and_then(|collider| collider.parent())
+                }) {
+                    rigidbody_set.queue_body_for_writeback(handle);
+                }
             }
 
             if let Ok(mut transform) = transforms.get_mut(entity_to_move) {

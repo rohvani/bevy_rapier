@@ -12,7 +12,7 @@ use bevy::prelude::*;
 /// System responsible for creating new Rapier joints from the related `bevy_rapier` components.
 pub fn init_joints(
     mut commands: Commands,
-    mut context_access: Query<(&RapierRigidBodySet, &mut RapierContextJoints)>,
+    mut context_access: Query<(&mut RapierRigidBodySet, &mut RapierContextJoints)>,
     default_context_access: Query<Entity, With<DefaultRapierContext>>,
     impulse_joints: Query<
         (Entity, Option<&RapierContextEntityLink>, &ImpulseJoint),
@@ -44,7 +44,7 @@ pub fn init_joints(
             log::error!("Could not find entity {context_entity} with rapier context while initializing {entity}");
             continue;
         };
-        let rigidbody_set = rigidbody_set_joints.0;
+        let mut rigidbody_set = rigidbody_set_joints.0;
         let mut target = None;
         let mut body_entity = entity;
         while target.is_none() {
@@ -57,10 +57,12 @@ pub fn init_joints(
         }
         let joints = rigidbody_set_joints.1.into_inner();
 
-        if let (Some(target), Some(source)) = (target, rigidbody_set.entity2body.get(&joint.parent))
-        {
+        if let (Some(target), Some(source)) = (
+            target,
+            rigidbody_set.entity2body.get(&joint.parent).copied(),
+        ) {
             let handle = joints.impulse_joints.insert(
-                *source,
+                source,
                 target,
                 joint.data.as_ref().into_rapier(),
                 true,
@@ -69,6 +71,10 @@ pub fn init_joints(
                 .entity(entity)
                 .insert(RapierImpulseJointHandle(handle));
             joints.entity2impulse_joint.insert(entity, handle);
+
+            // Joint insertion can wake either endpoint outside the scheduled step.
+            rigidbody_set.queue_body_for_writeback(source);
+            rigidbody_set.queue_body_for_writeback(target);
         }
     }
 
@@ -92,14 +98,16 @@ pub fn init_joints(
             log::error!("Could not find entity {context_entity} with rapier context while initializing {entity}");
             continue;
         };
-        let context = context_joints.0;
-        let target = context.entity2body.get(&entity);
+        let mut context = context_joints.0;
+        let target = context.entity2body.get(&entity).copied();
         let joints = context_joints.1.into_inner();
 
-        if let (Some(target), Some(source)) = (target, context.entity2body.get(&joint.parent)) {
+        if let (Some(target), Some(source)) =
+            (target, context.entity2body.get(&joint.parent).copied())
+        {
             if let Some(handle) = joints.multibody_joints.insert(
-                *source,
-                *target,
+                source,
+                target,
                 joint.data.as_ref().into_rapier(),
                 true,
             ) {
@@ -107,6 +115,10 @@ pub fn init_joints(
                     .entity(entity)
                     .insert(RapierMultibodyJointHandle(handle));
                 joints.entity2multibody_joint.insert(entity, handle);
+
+                // Multibody insertion can wake either endpoint outside the scheduled step.
+                context.queue_body_for_writeback(source);
+                context.queue_body_for_writeback(target);
             } else {
                 log::error!("Failed to create multibody joint: loop detected.")
             }
@@ -116,7 +128,7 @@ pub fn init_joints(
 
 /// System responsible for applying changes the user made to a joint component.
 pub fn apply_joint_user_changes(
-    mut context: Query<&mut RapierContextJoints>,
+    mut context: Query<(&mut RapierRigidBodySet, &mut RapierContextJoints)>,
     changed_impulse_joints: Query<
         (
             &RapierContextEntityLink,
@@ -137,19 +149,51 @@ pub fn apply_joint_user_changes(
     // TODO: right now, we only support propagating changes made to the joint data.
     //       Re-parenting the joint isn’t supported yet.
     for (link, handle, changed_joint) in changed_impulse_joints.iter() {
-        let mut context = context.get_mut(link.0).expect(RAPIER_CONTEXT_EXPECT_ERROR);
-        if let Some(joint) = context.impulse_joints.get_mut(handle.0, false) {
+        let (mut rigidbody_set, mut joints) =
+            context.get_mut(link.0).expect(RAPIER_CONTEXT_EXPECT_ERROR);
+
+        // Snapshot endpoints before the mutable joint update invalidates the immutable borrow.
+        let endpoints = joints
+            .impulse_joints
+            .get(handle.0)
+            .map(|joint| (joint.body1(), joint.body2()));
+        if let Some(joint) = joints.impulse_joints.get_mut(handle.0, false) {
             joint.data = changed_joint.data.as_ref().into_rapier();
+        }
+
+        // Changed constraints can wake either exact endpoint before a simulation substep.
+        if let Some((body1, body2)) = endpoints {
+            rigidbody_set.queue_body_for_writeback(body1);
+            rigidbody_set.queue_body_for_writeback(body2);
         }
     }
 
     for (link, handle, changed_joint) in changed_multibody_joints.iter() {
-        let mut context = context.get_mut(link.0).expect(RAPIER_CONTEXT_EXPECT_ERROR);
+        let (mut rigidbody_set, mut joints) =
+            context.get_mut(link.0).expect(RAPIER_CONTEXT_EXPECT_ERROR);
+
+        // Resolve both multibody links before mutating their joint description.
+        let endpoints = joints
+            .multibody_joints
+            .get(handle.0)
+            .and_then(|(multibody, link_id)| {
+                let link = multibody.link(link_id)?;
+                let parent = link
+                    .parent_id()
+                    .and_then(|parent_id| multibody.link(parent_id))?;
+                Some((parent.rigid_body_handle(), link.rigid_body_handle()))
+            });
         // TODO: not sure this will always work properly, e.g., if the number of Dofs is changed.
-        if let Some((mb, link_id)) = context.multibody_joints.get_mut(handle.0) {
+        if let Some((mb, link_id)) = joints.multibody_joints.get_mut(handle.0) {
             if let Some(link) = mb.link_mut(link_id) {
                 link.joint.data = changed_joint.data.as_ref().into_rapier();
             }
+        }
+
+        // Changed multibody constraints can wake either exact endpoint before a substep.
+        if let Some((body1, body2)) = endpoints {
+            rigidbody_set.queue_body_for_writeback(body1);
+            rigidbody_set.queue_body_for_writeback(body2);
         }
     }
 }

@@ -73,6 +73,8 @@ pub fn sync_removals(
         let context = &mut *context;
         let joints = &mut *joints;
 
+        // Removed generations have no ECS destination and must not accumulate while paused.
+        rigidbody_set.discard_body_from_writeback(handle);
         let _ = rigidbody_set.last_body_transform_set.remove(&handle);
         rigidbody_set.bodies.remove(
             handle,
@@ -90,6 +92,8 @@ pub fn sync_removals(
         {
             let context = &mut *context;
             let joints = &mut *joints;
+            // Removed generations have no ECS destination and must not accumulate while paused.
+            rigidbody_set.discard_body_from_writeback(handle);
             let _ = rigidbody_set.last_body_transform_set.remove(&handle);
             rigidbody_set.bodies.remove(
                 handle,
@@ -118,8 +122,17 @@ pub fn sync_removals(
             continue;
         };
         let context = &mut *context;
-        if let Some(parent) = context_colliders.collider_parent(&rigidbody_set, entity) {
-            mass_modified.write(parent.into());
+
+        // Resolve the backend parent before removing the collider-to-entity mapping.
+        let parent_handle = context_colliders
+            .colliders
+            .get(handle)
+            .and_then(|collider| collider.parent());
+        if let Some(parent_handle) = parent_handle {
+            if let Some(parent) = rigidbody_set.rigid_body_entity(parent_handle) {
+                mass_modified.write(parent.into());
+            }
+            rigidbody_set.queue_body_for_writeback(parent_handle);
         }
 
         context_colliders.colliders.remove(
@@ -139,8 +152,17 @@ pub fn sync_removals(
         {
             let context = &mut *context;
             let context_colliders = &mut *context_colliders;
-            if let Some(parent) = context_colliders.collider_parent(&rigidbody_set, entity) {
-                mass_modified.write(parent.into());
+
+            // Resolve the backend parent before removing the orphaned collider mapping.
+            let parent_handle = context_colliders
+                .colliders
+                .get(handle)
+                .and_then(|collider| collider.parent());
+            if let Some(parent_handle) = parent_handle {
+                if let Some(parent) = rigidbody_set.rigid_body_entity(parent_handle) {
+                    mass_modified.write(parent.into());
+                }
+                rigidbody_set.queue_body_for_writeback(parent_handle);
             }
 
             context_colliders.colliders.remove(
@@ -161,19 +183,31 @@ pub fn sync_removals(
         .read()
         .filter(|e| !q_has_impulse_joint_handle.contains(*e))
     {
-        let Some(((_, _, mut joints, _), handle)) = find_context(&mut context_writer, |res| {
-            res.2.entity2impulse_joint.remove(&entity)
-        }) else {
+        let Some(((_, _, mut joints, mut rigidbody_set), handle)) =
+            find_context(&mut context_writer, |res| {
+                res.2.entity2impulse_joint.remove(&entity)
+            })
+        else {
             continue;
         };
-        joints.impulse_joints.remove(handle, true);
+        if let Some(joint) = joints.impulse_joints.remove(handle, true) {
+            // Joint removal can wake either endpoint outside the scheduled step.
+            rigidbody_set.queue_body_for_writeback(joint.body1());
+            rigidbody_set.queue_body_for_writeback(joint.body2());
+        }
     }
 
     for entity in orphan_impulse_joints.iter() {
-        if let Some(((_, _, mut joints, _), handle)) = find_context(&mut context_writer, |res| {
-            res.2.entity2impulse_joint.remove(&entity)
-        }) {
-            joints.impulse_joints.remove(handle, true);
+        if let Some(((_, _, mut joints, mut rigidbody_set), handle)) =
+            find_context(&mut context_writer, |res| {
+                res.2.entity2impulse_joint.remove(&entity)
+            })
+        {
+            if let Some(joint) = joints.impulse_joints.remove(handle, true) {
+                // Joint removal can wake either endpoint outside the scheduled step.
+                rigidbody_set.queue_body_for_writeback(joint.body1());
+                rigidbody_set.queue_body_for_writeback(joint.body2());
+            }
         }
         commands.entity(entity).remove::<RapierImpulseJointHandle>();
     }
@@ -185,19 +219,58 @@ pub fn sync_removals(
         .read()
         .filter(|e| !q_has_multibody_joint_handle.contains(*e))
     {
-        let Some(((_, _, mut joints, _), handle)) = find_context(&mut context_writer, |res| {
-            res.2.entity2multibody_joint.remove(&entity)
-        }) else {
+        let Some(((_, _, mut joints, mut rigidbody_set), handle)) =
+            find_context(&mut context_writer, |res| {
+                res.2.entity2multibody_joint.remove(&entity)
+            })
+        else {
             continue;
         };
+
+        // Snapshot both links because removal consumes the multibody joint record.
+        let endpoints = joints
+            .multibody_joints
+            .get(handle)
+            .and_then(|(multibody, link_id)| {
+                let link = multibody.link(link_id)?;
+                let parent = link
+                    .parent_id()
+                    .and_then(|parent_id| multibody.link(parent_id))?;
+                Some((parent.rigid_body_handle(), link.rigid_body_handle()))
+            });
         joints.multibody_joints.remove(handle, true);
+
+        // Multibody removal can wake either endpoint outside the scheduled step.
+        if let Some((body1, body2)) = endpoints {
+            rigidbody_set.queue_body_for_writeback(body1);
+            rigidbody_set.queue_body_for_writeback(body2);
+        }
     }
 
     for entity in orphan_multibody_joints.iter() {
-        if let Some(((_, _, mut joints, _), handle)) = find_context(&mut context_writer, |res| {
-            res.2.entity2multibody_joint.remove(&entity)
-        }) {
+        if let Some(((_, _, mut joints, mut rigidbody_set), handle)) =
+            find_context(&mut context_writer, |res| {
+                res.2.entity2multibody_joint.remove(&entity)
+            })
+        {
+            // Snapshot both orphaned links because removal consumes the joint record.
+            let endpoints = joints
+                .multibody_joints
+                .get(handle)
+                .and_then(|(multibody, link_id)| {
+                    let link = multibody.link(link_id)?;
+                    let parent = link
+                        .parent_id()
+                        .and_then(|parent_id| multibody.link(parent_id))?;
+                    Some((parent.rigid_body_handle(), link.rigid_body_handle()))
+                });
             joints.multibody_joints.remove(handle, true);
+
+            // Multibody removal can wake either endpoint outside the scheduled step.
+            if let Some((body1, body2)) = endpoints {
+                rigidbody_set.queue_body_for_writeback(body1);
+                rigidbody_set.queue_body_for_writeback(body2);
+            }
         }
         commands
             .entity(entity)
@@ -221,8 +294,19 @@ pub fn sync_removals(
         if let Some((mut context, handle)) = find_context(&mut context_writer, |context| {
             context.1.entity2collider.get(&entity).copied()
         }) {
+            // Snapshot the parent before mutably re-enabling the collider.
+            let parent_handle = context
+                .1
+                .colliders
+                .get(handle)
+                .and_then(|collider| collider.parent());
             if let Some(co) = context.1.colliders.get_mut(handle) {
                 co.set_enabled(true);
+            }
+
+            // Re-enabling an attached collider can wake or renormalize its parent.
+            if let Some(parent_handle) = parent_handle {
+                context.3.queue_body_for_writeback(parent_handle);
             }
         }
     }
@@ -235,6 +319,9 @@ pub fn sync_removals(
         {
             if let Some(rb) = rigidbody_set.bodies.get_mut(handle) {
                 rb.set_enabled(true);
+
+                // Marker removal is an explicit backend transition even without a substep.
+                rigidbody_set.queue_body_for_writeback(handle);
             }
         }
     }

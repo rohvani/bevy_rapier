@@ -4,7 +4,7 @@ pub mod systemparams;
 
 use bevy::prelude::*;
 use rapier::parry::query::QueryDispatcher;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 use rapier::prelude::{
@@ -38,6 +38,20 @@ use crate::prelude::{
 pub struct SimulationToRenderTime {
     /// Difference between simulation and rendering time
     pub diff: f32,
+}
+
+/// Work cardinalities from the most recent rigid-body writeback pass.
+///
+/// These counters describe the single candidate traversal performed by the bridge. They are
+/// intended for diagnostics; reading them does not scan either the ECS or Rapier worlds.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RigidBodyWritebackStats {
+    /// Distinct Rapier handles visited by writeback.
+    pub visited: usize,
+    /// Handles that resolved to the exact live Bevy entity, context, and handle generation.
+    pub resolved: usize,
+    /// Resolved bodies that changed at least one Bevy writeback component.
+    pub changed: usize,
 }
 
 /// Marker component for to access the default [`ReadRapierContext`].
@@ -583,6 +597,18 @@ pub struct RapierRigidBodySet {
     /// For transform change detection.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) last_body_transform_set: HashMap<RigidBodyHandle, GlobalTransform>,
+
+    /// Reused candidate storage for bodies changed by physics or explicit Bevy input.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) bodies_to_writeback: Vec<RigidBodyHandle>,
+
+    /// Membership index that deduplicates the reusable candidate vector at insertion time.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) bodies_to_writeback_set: HashSet<RigidBodyHandle>,
+
+    /// Cardinalities captured while draining the candidate storage.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) writeback_stats: RigidBodyWritebackStats,
 }
 
 impl RapierRigidBodySet {
@@ -596,6 +622,32 @@ impl RapierRigidBodySet {
         self.bodies
             .get(handle)
             .map(|c| Entity::from_bits(c.user_data as u64))
+    }
+
+    /// Returns work cardinalities from the most recent writeback pass.
+    pub fn writeback_stats(&self) -> RigidBodyWritebackStats {
+        self.writeback_stats
+    }
+
+    /// Retains a body that may need its Rapier result published back to Bevy.
+    pub(crate) fn queue_body_for_writeback(&mut self, handle: RigidBodyHandle) {
+        if self.bodies_to_writeback_set.insert(handle) {
+            self.bodies_to_writeback.push(handle);
+        }
+    }
+
+    /// Drops work for a removed handle so paused create/remove churn remains bounded.
+    pub(crate) fn discard_body_from_writeback(&mut self, handle: RigidBodyHandle) {
+        self.bodies_to_writeback_set.remove(&handle);
+        self.bodies_to_writeback
+            .retain(|candidate| *candidate != handle);
+    }
+
+    /// Retains every currently active dynamic and kinematic body around one simulation boundary.
+    pub(crate) fn queue_active_bodies_for_writeback(&mut self, islands: &IslandManager) {
+        for handle in islands.active_bodies() {
+            self.queue_body_for_writeback(handle);
+        }
     }
 
     /// This method makes sure that the rigid-body positions have been propagated to
@@ -730,6 +782,16 @@ impl RapierContextSimulation {
             .or_else(|| event_queue.as_ref().map(|q| q as &dyn EventHandler))
             .unwrap_or(&() as &dyn EventHandler);
 
+        // Interpolation continues across render-only frames after a body leaves the active island,
+        // so every opted-in interpolation body remains a bounded writeback candidate.
+        if matches!(timestep_mode, TimestepMode::Interpolated { .. }) {
+            if let Some(interpolation_query) = interpolation_query.as_mut() {
+                for (handle, _) in interpolation_query.iter_mut() {
+                    rigidbody_set.queue_body_for_writeback(handle.0);
+                }
+            }
+        }
+
         let mut executed_steps = 0;
         match timestep_mode {
             TimestepMode::Interpolated {
@@ -762,6 +824,9 @@ impl RapierContextSimulation {
                     substep_integration_parameters.dt = dt / (substeps as Real) * time_scale;
 
                     for _ in 0..substeps {
+                        // Capture both sides so bodies that enter or leave an active island during
+                        // this substep still publish their complete final state.
+                        rigidbody_set.queue_active_bodies_for_writeback(&self.islands);
                         self.pipeline.step(
                             gravity,
                             &substep_integration_parameters,
@@ -776,6 +841,7 @@ impl RapierContextSimulation {
                             hooks,
                             event_handler,
                         );
+                        rigidbody_set.queue_active_bodies_for_writeback(&self.islands);
                         executed_steps += 1;
                     }
 
@@ -793,6 +859,9 @@ impl RapierContextSimulation {
                 substep_integration_parameters.dt /= substeps as Real;
 
                 for _ in 0..substeps {
+                    // Capture both sides so bodies that enter or leave an active island during
+                    // this substep still publish their complete final state.
+                    rigidbody_set.queue_active_bodies_for_writeback(&self.islands);
                     self.pipeline.step(
                         gravity,
                         &substep_integration_parameters,
@@ -807,6 +876,7 @@ impl RapierContextSimulation {
                         hooks,
                         event_handler,
                     );
+                    rigidbody_set.queue_active_bodies_for_writeback(&self.islands);
                     executed_steps += 1;
                 }
             }
@@ -817,6 +887,9 @@ impl RapierContextSimulation {
                 substep_integration_parameters.dt = dt / (substeps as Real);
 
                 for _ in 0..substeps {
+                    // Capture both sides so bodies that enter or leave an active island during
+                    // this substep still publish their complete final state.
+                    rigidbody_set.queue_active_bodies_for_writeback(&self.islands);
                     self.pipeline.step(
                         gravity,
                         &substep_integration_parameters,
@@ -831,6 +904,7 @@ impl RapierContextSimulation {
                         hooks,
                         event_handler,
                     );
+                    rigidbody_set.queue_active_bodies_for_writeback(&self.islands);
                     executed_steps += 1;
                 }
             }
