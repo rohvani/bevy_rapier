@@ -766,6 +766,11 @@ impl RapierContextSimulation {
             &mut Query<(&RapierRigidBodyHandle, &mut TransformInterpolation)>,
         >,
     ) {
+        // Rapier 0.35 only invalidates fixed CCD targets on frames that actually run a sweep.
+        // A collider removed during slow motion can otherwise remain cached until gravity makes
+        // another body fast, causing an invalid-handle panic (or stale moved/added obstacles).
+        // Keep this stateless solver's cache local to one update, including all of its substeps.
+        self.ccd_solver = CCDSolver::new();
         let event_queue = if events.is_some() {
             Some(EventQueue {
                 deleted_colliders: &self.deleted_colliders,
