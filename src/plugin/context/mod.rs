@@ -630,7 +630,8 @@ impl RapierRigidBodySet {
     }
 
     /// Retains a body that may need its Rapier result published back to Bevy.
-    pub(crate) fn queue_body_for_writeback(&mut self, handle: RigidBodyHandle) {
+    /// Retain a body changed by an external motor for ECS writeback, including paused frames.
+    pub fn queue_body_for_writeback(&mut self, handle: RigidBodyHandle) {
         if self.bodies_to_writeback_set.insert(handle) {
             self.bodies_to_writeback.push(handle);
         }
