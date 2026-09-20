@@ -146,6 +146,16 @@ pub fn apply_rigid_body_user_changes(
             .expect(RAPIER_CONTEXT_EXPECT_ERROR)
             .into_inner();
 
+        // ECS writeback also changes Sleeping. Reading it back must not register a backend
+        // mutation: Rapier uses the modified-body set to invalidate its solver caches.
+        let needs_update = rigidbody_set.bodies.get(handle.0).is_some_and(|rb| {
+            rb.activation().normalized_linear_threshold != sleeping.normalized_linear_threshold
+                || rb.activation().angular_threshold != sleeping.angular_threshold
+                || rb.is_sleeping() != sleeping.sleeping
+        });
+        if !needs_update {
+            continue;
+        }
         if let Some(rb) = rigidbody_set.bodies.get_mut(handle.0) {
             let activation = rb.activation_mut();
             activation.normalized_linear_threshold = sleeping.normalized_linear_threshold;
@@ -227,17 +237,20 @@ pub fn apply_rigid_body_user_changes(
                 interpolation.end = None;
             }
         }
-        // TODO: avoid to run multiple times the mutable deref ?
+        // Detect user edits before obtaining mutable backend access. A Changed<GlobalTransform>
+        // produced by our own writeback is already in Rapier and must leave its caches intact.
+        transform_changed = transform_changed.or_else(|| {
+            Some(transform_changed_fn(
+                &handle.0,
+                config,
+                global_transform,
+                &rigidbody_set.last_body_transform_set,
+            ))
+        });
+        if transform_changed != Some(true) {
+            continue;
+        }
         if let Some(rb) = rigidbody_set.bodies.get_mut(handle.0) {
-            transform_changed = transform_changed.or_else(|| {
-                Some(transform_changed_fn(
-                    &handle.0,
-                    config,
-                    global_transform,
-                    &rigidbody_set.last_body_transform_set,
-                ))
-            });
-
             match rb.body_type() {
                 RigidBodyType::KinematicPositionBased => {
                     if transform_changed == Some(true) {
@@ -275,6 +288,14 @@ pub fn apply_rigid_body_user_changes(
             .get_mut(link.0)
             .expect(RAPIER_CONTEXT_EXPECT_ERROR)
             .into_inner();
+        // Velocity writeback is an ECS change, not a second user-authored impulse.
+        let needs_update = rigidbody_set
+            .bodies
+            .get(handle.0)
+            .is_some_and(|rb| rb.linvel() != velocity.linear || rb.angvel() != velocity.angular);
+        if !needs_update {
+            continue;
+        }
         if let Some(rb) = rigidbody_set.bodies.get_mut(handle.0) {
             rb.set_linvel(velocity.linear, true);
             #[allow(clippy::useless_conversion)] // Need to convert if dim3 enabled
