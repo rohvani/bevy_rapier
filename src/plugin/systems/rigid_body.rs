@@ -1,14 +1,14 @@
 use crate::dynamics::RapierRigidBodyHandle;
 use crate::plugin::context::systemparams::RAPIER_CONTEXT_EXPECT_ERROR;
 use crate::plugin::context::{
-    DefaultRapierContext, RapierContextColliders, RapierContextEntityLink, RapierRigidBodySet,
+    BodyTransformCache, DefaultRapierContext, RapierContextColliders, RapierContextEntityLink,
+    RapierRigidBodySet,
 };
 use crate::plugin::{configuration::TimestepMode, RapierConfiguration};
 use crate::{dynamics::RigidBody, plugin::context::SimulationToRenderTime};
 use crate::{prelude::*, utils};
 use bevy::prelude::*;
 use rapier::dynamics::{RigidBodyBuilder, RigidBodyHandle, RigidBodyType};
-use std::collections::HashMap;
 
 /// Components that will be updated after a physics step.
 pub type RigidBodyWritebackComponents<'a> = (
@@ -199,7 +199,7 @@ pub fn apply_rigid_body_user_changes(
         |handle: &RigidBodyHandle,
          config: &RapierConfiguration,
          transform: &GlobalTransform,
-         last_transform_set: &HashMap<RigidBodyHandle, GlobalTransform>| {
+         last_transform_set: &BodyTransformCache| {
             if config.force_update_from_transform_changes {
                 true
             } else if let Some(prev) = last_transform_set.get(handle) {

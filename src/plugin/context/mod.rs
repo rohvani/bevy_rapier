@@ -1,10 +1,13 @@
 //! These are components used and modified during a simulation frame.
 
+mod body_transform_cache;
 pub mod systemparams;
+pub(crate) use body_transform_cache::BodyTransformCache;
 
+use bevy::platform::collections::HashSet as HandleSet;
 use bevy::prelude::*;
 use rapier::parry::query::QueryDispatcher;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::RwLock;
 
 use rapier::prelude::{
@@ -595,8 +598,9 @@ pub struct RapierRigidBodySet {
     pub(crate) entity2body: HashMap<Entity, RigidBodyHandle>,
 
     /// For transform change detection.
+    // This context-local cache never supplies simulation iteration order.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
-    pub(crate) last_body_transform_set: HashMap<RigidBodyHandle, GlobalTransform>,
+    pub(crate) last_body_transform_set: BodyTransformCache,
 
     /// Reused candidate storage for bodies changed by physics or explicit Bevy input.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
@@ -604,7 +608,7 @@ pub struct RapierRigidBodySet {
 
     /// Membership index that deduplicates the reusable candidate vector at insertion time.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
-    pub(crate) bodies_to_writeback_set: HashSet<RigidBodyHandle>,
+    pub(crate) bodies_to_writeback_set: HandleSet<RigidBodyHandle>,
 
     /// Cardinalities captured while draining the candidate storage.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
